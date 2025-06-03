@@ -226,6 +226,33 @@ var _ = Describe("create", func() {
 			})
 		})
 
+		Context("With manually modified Secret", func() {
+			It("should detect the change and reconcile the Secret back to the SealedSecret's data", func() {
+				expected := map[string][]byte{"foo": []byte("bar")}
+
+				By("Waiting for the original Secret to be created")
+				Eventually(func() (*v1.Secret, error) {
+					return c.Secrets(ns).Get(ctx, secretName, metav1.GetOptions{})
+				}, Timeout, PollingInterval).Should(WithTransform(getData, Equal(expected)))
+
+				By("Manually modifying the Secret's data")
+				secret, err := c.Secrets(ns).Get(ctx, secretName, metav1.GetOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				secret.Data["foo"] = []byte("tampered")
+				_, err = c.Secrets(ns).Update(ctx, secret, metav1.UpdateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+
+				By("Expecting the controller to revert the tampered value")
+				Eventually(func() ([]byte, error) {
+					secret, err := c.Secrets(ns).Get(ctx, secretName, metav1.GetOptions{})
+					if err != nil {
+						return nil, err
+					}
+					return secret.Data["foo"], nil
+				}, Timeout, PollingInterval).Should(Equal([]byte("bar")))
+			})
+		})
+
 		Context("With existing object (update)", func() {
 			JustBeforeEach(func() {
 				var err error
