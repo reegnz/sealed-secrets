@@ -162,9 +162,56 @@ func sealedSecretChanged(oldObj, newObj interface{}) bool {
 	return !reflect.DeepEqual(oldSealedSecret.Spec, newSealedSecret.Spec)
 }
 
+func secretChanged(oldObj, newObj interface{}) bool {
+	oldSecret, ok := (oldObj).(*corev1.Secret)
+	if !ok {
+		return true
+	}
+	newSecret, ok := (newObj).(*corev1.Secret)
+	if !ok {
+		return true
+	}
+	return !reflect.DeepEqual(oldSecret.Data, newSecret.Data)
+}
+
 func watchSecrets(sinformer informers.SharedInformerFactory, ssclientset ssclientset.Interface, queue workqueue.TypedRateLimitingInterface[string]) (cache.SharedIndexInformer, error) {
 	sInformer := sinformer.Core().V1().Secrets().Informer()
 	_, err := sInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			skey, err := cache.MetaNamespaceKeyFunc(newObj)
+			if err != nil {
+				slog.Error("failed to fetch Secret key", "error", err)
+				return
+			}
+			if !secretChanged(oldObj, newObj) {
+				slog.Info("update suppressed, no changes in data", "secret", skey)
+			}
+			ns, name, err := cache.SplitMetaNamespaceKey(skey)
+			if err != nil {
+				slog.Error("failed to get namespace and name from key", "secret", skey, "error", err)
+				return
+			}
+			ssecret, err := ssclientset.BitnamiV1alpha1().SealedSecrets(ns).Get(context.Background(), name, metav1.GetOptions{})
+			if err != nil {
+				if !k8serrors.IsNotFound(err) {
+					slog.Error("failed to get SealedSecret", "secret", skey, "error", err)
+					return
+				}
+				slog.Info("update suppressed, no SealedSecret found", "secret", skey)
+				return
+			}
+			if !metav1.IsControlledBy(newObj.(*corev1.Secret), ssecret) && !isAnnotatedToBeManaged(newObj.(*corev1.Secret)) {
+				slog.Info("update suppressed, Secret not managed", "secret", skey)
+				return
+			}
+			sskey, err := cache.MetaNamespaceKeyFunc(ssecret)
+			if err != nil {
+				slog.Error("failed to fetch SealedSecret key", "secret", skey, "error", err)
+				return
+			}
+
+			queue.Add(sskey)
+		},
 		DeleteFunc: func(obj interface{}) {
 			skey, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 			if err != nil {
